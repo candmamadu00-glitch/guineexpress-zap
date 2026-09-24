@@ -14,13 +14,13 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 const PORT = process.env.PORT || 3001;
-const ZAP_SECRET = process.env.ZAP_SECRET || 'sua_senha_inquebravel_aqui_12345';
+const ZAP_SECRET = process.env.ZAP_SECRET || '5800991m@Mm12345';
 const authPath = path.join(__dirname, 'sessao_zap');
 
 let sock = null;
 let qrCodeData = null;
 
-// Middleware de Segurança Blindada
+// Middleware de Segurança
 const verifyToken = (req, res, next) => {
     const bearerHeader = req.headers['authorization'];
     if (bearerHeader && bearerHeader.split(' ')[1] === ZAP_SECRET) {
@@ -31,53 +31,67 @@ const verifyToken = (req, res, next) => {
 };
 
 async function iniciarZap() {
-    const { state, saveCreds } = await useMultiFileAuthState(authPath);
-    const { version } = await fetchLatestBaileysVersion();
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(authPath);
+        const { version } = await fetchLatestBaileysVersion();
 
-    console.log(`📡 Conectando WhatsApp v${version.join('.')}`);
+        console.log(`📡 Conectando WhatsApp v${version.join('.')}`);
 
-    sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome')
-    });
+        sock = makeWASocket({
+            version,
+            auth: state,
+            printQRInTerminal: false,
+            logger: pino({ level: 'silent' }),
+            browser: Browsers.ubuntu('Chrome'),
+            connectTimeoutMs: 60000,      // 60 segundos de tolerância contra Status 408 no Render
+            defaultQueryTimeoutMs: 0,
+            keepAliveIntervalMs: 10000,
+            syncFullHistory: false,
+            markOnlineOnConnect: true
+        });
 
-    sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        
-        if (qr) {
-            qrCodeData = await qrcode.toDataURL(qr);
-        }
-
-        if (connection === 'close') {
-            const status = lastDisconnect?.error?.output?.statusCode;
-            console.log(`⚠️ Conexão perdida (Status: ${status}).`);
-            qrCodeData = null;
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
             
-            const sessaoInvalida = [401, 403, 405, DisconnectReason.loggedOut].includes(status);
-            if (sessaoInvalida) {
-                console.log("❌ Sessão expirada. Apagando...");
-                fs.rmSync(authPath, { recursive: true, force: true });
+            if (qr) {
+                console.log("⚡ QR Code gerado com sucesso!");
+                qrCodeData = await qrcode.toDataURL(qr);
             }
-            
-            sock = null;
-            setTimeout(iniciarZap, 5000);
-        } else if (connection === 'open') {
-            console.log('✅ SISTEMA ZAP ONLINE E PRONTO!');
-            qrCodeData = null;
-        }
-    });
+
+            if (connection === 'close') {
+                const status = lastDisconnect?.error?.output?.statusCode;
+                console.log(`⚠️ Conexão perdida (Status: ${status || 'desconhecido'}). Reconectando...`);
+                qrCodeData = null;
+                
+                // Se a sessão for revogada ou expirada, limpa as credenciais
+                const sessaoInvalida = [401, 403, 405, DisconnectReason.loggedOut].includes(status);
+                if (sessaoInvalida) {
+                    console.log("❌ Sessão inválida. Limpando credenciais...");
+                    if (fs.existsSync(authPath)) {
+                        fs.rmSync(authPath, { recursive: true, force: true });
+                    }
+                }
+                
+                sock = null;
+                setTimeout(iniciarZap, 5000);
+            } else if (connection === 'open') {
+                console.log('✅ SISTEMA ZAP ONLINE E PRONTO NO RENDER!');
+                qrCodeData = null;
+            }
+        });
+    } catch (err) {
+        console.error("❌ Erro ao inicializar o Baileys:", err.message);
+        setTimeout(iniciarZap, 5000);
+    }
 }
 
-// ROTA: Enviar Mensagem (Protegida)
+// ROTA: Enviar Mensagem
 app.post('/api/enviar', verifyToken, async (req, res) => {
-    if (!sock || !sock.user) return res.status(503).json({ status: 'offline' });
+    if (!sock || !sock.user) return res.status(503).json({ status: 'offline', error: 'WhatsApp offline' });
 
-    const { numero, opcoes, arquivoBase64, tipo, texto, fileName, legenda, mimetype } = req.body;
+    const { numero, arquivoBase64, tipo, texto, fileName, legenda, mimetype } = req.body;
     const numLimpo = numero.replace(/\D/g, '');
     const jid = `${numLimpo}@s.whatsapp.net`;
 
