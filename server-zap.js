@@ -15,10 +15,18 @@ app.use(express.json({ limit: '50mb' }));
 
 const PORT = process.env.PORT || 3001;
 const ZAP_SECRET = process.env.ZAP_SECRET || '5800991m@Mm12345';
-const authPath = path.join(__dirname, 'sessao_zap');
+
+// 🟢 USA A PASTA PERMANENTE /data SE EXISTIR NO RENDER
+const authDir = fs.existsSync('/data') ? '/data' : __dirname;
+const authPath = path.join(authDir, 'sessao_zap');
+
+if (!fs.existsSync(authPath)) {
+    fs.mkdirSync(authPath, { recursive: true });
+}
 
 let sock = null;
 let qrCodeData = null;
+let isConnecting = false;
 
 // Middleware de Segurança
 const verifyToken = (req, res, next) => {
@@ -31,6 +39,9 @@ const verifyToken = (req, res, next) => {
 };
 
 async function iniciarZap() {
+    if (isConnecting) return;
+    isConnecting = true;
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(authPath);
         const { version } = await fetchLatestBaileysVersion();
@@ -43,9 +54,9 @@ async function iniciarZap() {
             printQRInTerminal: false,
             logger: pino({ level: 'silent' }),
             browser: Browsers.ubuntu('Chrome'),
-            connectTimeoutMs: 60000,      // 60 segundos de tolerância contra Status 408 no Render
+            connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 0,
-            keepAliveIntervalMs: 10000,
+            keepAliveIntervalMs: 25000,
             syncFullHistory: false,
             markOnlineOnConnect: true
         });
@@ -61,27 +72,30 @@ async function iniciarZap() {
             }
 
             if (connection === 'close') {
+                isConnecting = false;
                 const status = lastDisconnect?.error?.output?.statusCode;
                 console.log(`⚠️ Conexão perdida (Status: ${status || 'desconhecido'}). Reconectando...`);
                 qrCodeData = null;
+                sock = null;
                 
-                // Se a sessão for revogada ou expirada, limpa as credenciais
-                const sessaoInvalida = [401, 403, 405, DisconnectReason.loggedOut].includes(status);
+                // Se a sessão foi deslogada no celular (401, 403, 501), limpa credenciais
+                const sessaoInvalida = [401, 403, DisconnectReason.loggedOut].includes(status);
                 if (sessaoInvalida) {
-                    console.log("❌ Sessão inválida. Limpando credenciais...");
+                    console.log("❌ Sessão revogada. Limpando credenciais antigas...");
                     if (fs.existsSync(authPath)) {
                         fs.rmSync(authPath, { recursive: true, force: true });
                     }
                 }
                 
-                sock = null;
                 setTimeout(iniciarZap, 5000);
             } else if (connection === 'open') {
+                isConnecting = false;
                 console.log('✅ SISTEMA ZAP ONLINE E PRONTO NO RENDER!');
                 qrCodeData = null;
             }
         });
     } catch (err) {
+        isConnecting = false;
         console.error("❌ Erro ao inicializar o Baileys:", err.message);
         setTimeout(iniciarZap, 5000);
     }
@@ -89,10 +103,17 @@ async function iniciarZap() {
 
 // ROTA: Enviar Mensagem
 app.post('/api/enviar', verifyToken, async (req, res) => {
-    if (!sock || !sock.user) return res.status(503).json({ status: 'offline', error: 'WhatsApp offline' });
+    if (!sock || !sock.user) {
+        return res.status(503).json({ success: false, status: 'offline', error: 'WhatsApp não está conectado' });
+    }
 
     const { numero, arquivoBase64, tipo, texto, fileName, legenda, mimetype } = req.body;
-    const numLimpo = numero.replace(/\D/g, '');
+    
+    if (!numero) {
+        return res.status(400).json({ success: false, error: 'Número de telefone não fornecido' });
+    }
+
+    let numLimpo = numero.replace(/\D/g, '');
     const jid = `${numLimpo}@s.whatsapp.net`;
 
     try {
@@ -101,20 +122,22 @@ app.post('/api/enviar', verifyToken, async (req, res) => {
             await sock.sendMessage(jid, { 
                 document: buffer, 
                 mimetype: mimetype || 'application/pdf', 
-                fileName: fileName || 'Documento.pdf', 
+                fileName: fileName || 'Comprovante.pdf', 
                 caption: legenda || '' 
             });
+            console.log(`📄 [ZAP] Documento enviado para ${numLimpo}`);
         } else if (tipo === 'texto') {
             await sock.sendMessage(jid, { text: texto });
+            console.log(`💬 [ZAP] Texto enviado para ${numLimpo}`);
         }
         res.json({ success: true, status: 'sent' });
     } catch (e) {
-        console.error("Erro no envio:", e);
+        console.error("❌ Erro no envio via WhatsApp:", e.message);
         res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// ROTA: Checar Status e Pegar QR Code
+// ROTA: Checar Status
 app.get('/api/status', verifyToken, (req, res) => {
     if (sock && sock.user) return res.json({ status: 'online' });
     if (qrCodeData) return res.json({ status: 'aguardando_qr', qr: qrCodeData });
