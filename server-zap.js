@@ -1,3 +1,13 @@
+// Silencia spam interno de Bad MAC do libsignal sem ocultar erros reais
+const _origConsoleError = console.error;
+console.error = (...args) => {
+    const first = args[0] ? String(args[0]) : '';
+    if (first.includes('Session error:Error: Bad MAC') || first.includes('Failed to decrypt message with any known session')) {
+        return;
+    }
+    _origConsoleError.apply(console, args);
+};
+
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
