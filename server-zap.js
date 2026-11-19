@@ -116,15 +116,20 @@ app.post('/api/enviar', verifyToken, async (req, res) => {
     let numLimpo = numero.replace(/\D/g, '');
 
     try {
-        // 🟢 Identifica o endereço (JID) correto no WhatsApp (corrige o problema do 9º dígito)
-        const [resultado] = await sock.onWhatsApp(numLimpo);
-
-        if (!resultado || !resultado.exists) {
-            console.log(`❌ [ZAP] Número ${numLimpo} não tem conta no WhatsApp.`);
-            return res.status(404).json({ success: false, error: 'Número não encontrado no WhatsApp' });
+        if (!global.jidCache) global.jidCache = new Map();
+        let targetJid = null;
+        const cached = global.jidCache.get(numLimpo);
+        if (cached && (Date.now() - cached.ts) < 86400000) {
+            targetJid = cached.jid;
+        } else {
+            const [resultado] = await sock.onWhatsApp(numLimpo);
+            if (!resultado || !resultado.exists) {
+                console.log(`❌ [ZAP] Número ${numLimpo} não tem conta no WhatsApp.`);
+                return res.status(404).json({ success: false, error: 'Número não encontrado no WhatsApp' });
+            }
+            targetJid = resultado.jid;
+            global.jidCache.set(numLimpo, { jid: targetJid, ts: Date.now() });
         }
-
-        const targetJid = resultado.jid; // Usa o JID oficial retornado pelo WhatsApp
 
         if (tipo === 'documento' && arquivoBase64) {
             const buffer = Buffer.from(arquivoBase64, 'base64');
